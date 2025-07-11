@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 require("dotenv").config();
+const stripe = require('stripe')(process.env.PAYMENT_KEY);
 
 const app = express();
 const port = process.env.PORT || 2100;
@@ -30,9 +31,8 @@ async function run() {
       "Pinged your deployment. You successfully connected to MongoDB!"
     );
 
-    const parcelCollection = client
-      .db("profastDB")
-      .collection("parcels");
+    const parcelCollection = client.db("profastDB").collection("parcels");
+    const paymentsCollection = client.db("profastDB").collection("payments");
 
     // 🌐 GET: All parcels
     app.get("/parcels", async (req, res) => {
@@ -90,10 +90,85 @@ async function run() {
     }
 
     res.status(200).send( result);
+//     res.status(200).send({
+//   message: "Parcel deleted successfully",
+//   result: result
+// });
+
   } catch (error) {
     res.status(500).send({ message: "Failed to delete parcel", error });
   }
 });
+
+//stripe
+// ✅ GET /payments?email=user@example.com
+app.get("/payments", async (req, res) => {
+  try {
+    const { email } = req.query;
+    const filter = email ? { userEmail: email } : {};
+
+    const history = await paymentsCollection
+      .find(filter)
+      .sort({ paidAt: -1 }) // latest first
+      .toArray();
+
+    res.status(200).send(history);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to fetch payment history", error });
+  }
+});
+
+// ✅ POST /payment after succeed
+app.post("/payments", async (req, res) => {
+  try {
+    const { parcel_id, userEmail, transactionId, amount, paymentMethod } = req.body;
+
+    if (!parcel_id || !userEmail || !transactionId || !amount) {
+      return res.status(400).send({ message: "Missing required fields" });
+    }
+
+    // ✅ Update parcel payment_status
+    const updateParcel = await parcelCollection.updateOne(
+      { _id: new ObjectId(parcel_id) },
+      { $set: { payment_status: "paid" } }
+    );
+
+    // ✅ Insert into payment history
+    const paymentEntry = {
+      parcel_id,
+      userEmail,
+      transactionId,
+      paymentMethod,
+      amount,
+      paid_at_string : new Date().toISOString(),
+      paid_at: new Date(), // store timestamp
+    };
+
+    const insertPayment = await paymentsCollection.insertOne(paymentEntry);
+
+    res.status(200).send({
+      message: "Payment recorded successfully",
+      updated: updateParcel.modifiedCount,
+      paymentId: insertPayment.insertedId,
+    });
+  } catch (error) {
+    res.status(500).send({ message: "Failed to record payment", error });
+  }
+});
+
+// POST /create-payment-intent
+app.post("/create-payment-intent", async (req, res) => {
+  const { amount } = req.body;
+
+  const paymentIntent = await stripe.paymentIntents.create({
+    amount: amount * 100, // Stripe uses cents
+    currency: "bdt",
+    payment_method_types: ["card"],
+  });
+
+  res.send({ clientSecret: paymentIntent.client_secret });
+});
+
 
 
   } finally {
